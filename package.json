@@ -33,12 +33,12 @@
             },
     "repository":  {
                        "type":  "git",
-                       "url":  "git+https://github.com/a1179162858-collab/dsh-update-center.git"
+                       "url":  "git+https://github.com/HansyLin-xCoFe/dsh-update-center.git"
                    },
-    "homepage":  "https://github.com/a1179162858-collab/dsh-update-center",
+    "homepage":  "https://github.com/HansyLin-xCoFe/dsh-update-center",
     "author":  {
-                   "name":  "a1179162858-collab",
-                   "url":  "https://github.com/a1179162858-collab"
+                   "name":  "HansyLin-xCoFe",
+                   "url":  "https://github.com/HansyLin-xCoFe"
                },
     "license":  "MIT",
     "keywords":  [

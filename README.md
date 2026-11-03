@@ -41,7 +41,7 @@ GitHub 不可达时仍会提示更新，只是「更新重点」显示为空。
 在 DSH Web 的 **设置 → 插件** 里添加，spec 填：
 
 ```
-github:a1179162858-collab/dsh-update-center
+github:HansyLin-xCoFe/dsh-update-center
 ```
 
 或者使用 `plugin_manager` 工具 / 插件管理器的安装入口，target 同样填上面这个地址。
