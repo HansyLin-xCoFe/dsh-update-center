@@ -1,0 +1,55 @@
+{
+    "name":  "dsh-update-center",
+    "version":  "1.0.0",
+    "private":  true,
+    "description":  "Check DSH releases, read the highlights, and update to the latest version with one click — from Settings → General or the bottom-left prompt.",
+    "type":  "module",
+    "exports":  {
+                    ".":  "./index.js",
+                    "./client":  "./client.js",
+                    "./locale/*.json":  "./locale/*.json",
+                    "./icon":  "./icon.svg"
+                },
+    "files":  [
+                  "index.js",
+                  "client.js",
+                  "update-helper.mjs",
+                  "cordis.patch.yml",
+                  "locale/*.json",
+                  "icon.svg"
+              ],
+    "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           },
+                "client":  {
+                               "platform":  "web",
+                               "immediately":  true,
+                               "inject":  [
+                                              "@deepseek-ai/dsh-client-locale",
+                                              "@deepseek-ai/dsh-client-ui-settings"
+                                          ]
+                           }
+            },
+    "repository":  {
+                       "type":  "git",
+                       "url":  "git+https://github.com/a1179162858-collab/dsh-update-center.git"
+                   },
+    "homepage":  "https://github.com/a1179162858-collab/dsh-update-center",
+    "author":  {
+                   "name":  "a1179162858-collab",
+                   "url":  "https://github.com/a1179162858-collab"
+               },
+    "license":  "MIT",
+    "keywords":  [
+                     "dsh",
+                     "dsh-plugin",
+                     "deepseek-harness",
+                     "deepseek",
+                     "updater",
+                     "web-ui"
+                 ],
+    "engines":  {
+                    "dsh":  "\u003e=0.2.1-rc.2"
+                }
+}

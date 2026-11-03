@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="DSH update">
+  <defs>
+    <linearGradient id="dsu-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5B8BFF"/>
+      <stop offset="1" stop-color="#2240D0"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#dsu-bg)"/>
+  <path d="M32 15v23" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round"/>
+  <path d="M21.5 29.5 32 40l10.5-10.5" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M20 47.5h24" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round" opacity="0.85"/>
+</svg>

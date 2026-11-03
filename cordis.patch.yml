@@ -1,0 +1,5 @@
+# dsh-update-center — Host half (HTTP routes for the Web update UI).
+# The browser half travels through the package's dsh.client declaration.
+- insert:
+    - id: dsh-update-center
+      name: dsh-update-center
