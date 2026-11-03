@@ -75,6 +75,10 @@ plugin/
 （最稳是刷新页面）。插件 Config 未暴露可调项，更新源常量在 `index.js` 顶部
 （`REGISTRY_LATEST_URL` / `RELEASES_URL`）。
 
+## Credits
+
+本项目的插件代码、文档、验证与发布流程，全部由 **DeepSeek-V4.1-Flash** 与 **DeepSeek Harness** 完成。
+
 ## License
 
 MIT
