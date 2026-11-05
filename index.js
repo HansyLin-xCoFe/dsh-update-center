@@ -34,6 +34,7 @@ const STATE_DIR = join(DSH_HOME, 'dsh-update');
 const STATE_FILE = join(STATE_DIR, 'state.json');
 const LOG_DIR = join(STATE_DIR, 'logs');
 const PLAN_DIR = join(STATE_DIR, 'plans');
+const LOCK_FILE = join(STATE_DIR, 'update.lock');
 
 /* ------------------------------------------------------------------ *
  * Version math (semver subset: numeric core + prerelease identifiers) *
@@ -327,6 +328,43 @@ async function fetchReleases() {
 }
 
 /* ---------------- *
+ * Update lock      *
+ * ---------------- */
+
+/**
+ * The update lock lives beside state.json and is created exclusively by the
+ * detached helper (index.js only reads it). Two concurrent `npm install -g`
+ * runs deleted the global tree on 2026-11-05, so a live lock means every new
+ * apply request is refused until that helper exits.
+ */
+function readUpdateLock() {
+  try {
+    const parsed = JSON.parse(readFileSync(LOCK_FILE, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function activeUpdate() {
+  const lock = readUpdateLock();
+  if (lock === null) return null;
+  const age = Date.now() - Number(lock.at ?? 0);
+  const stale = !(age < 45 * 60 * 1000) || !processAlive(lock.pid);
+  return stale ? null : lock;
+}
+
+/* ---------------- *
  * Status assembly  *
  * ---------------- */
 
@@ -393,6 +431,7 @@ async function buildStatus(force) {
   const updateAvailable =
     current !== null && latest !== null && compareVersions(latest, current) > 0;
   const latestRelease = pending.find((release) => release.version === latest) ?? null;
+  const running = activeUpdate();
 
   return {
     package: PACKAGE,
@@ -400,6 +439,8 @@ async function buildStatus(force) {
     latest,
     channel: 'latest',
     updateAvailable,
+    updating: running !== null,
+    updatingVersion: running === null ? null : (running.target ?? null),
     ignoredVersion: typeof state.ignoredVersion === 'string' ? state.ignoredVersion : null,
     ignored: latest !== null && state.ignoredVersion === latest,
     pending,
@@ -564,6 +605,13 @@ async function handleApply(request, response) {
     sendJson(response, 409, { error: '当前已经是最新版本' });
     return;
   }
+  const running = activeUpdate();
+  if (running !== null) {
+    sendJson(response, 409, {
+      error: `已有更新正在进行（PID ${running.pid}，目标 ${running.target ?? '未知'}），请等待它结束`,
+    });
+    return;
+  }
   const target = status.latest;
   const dryRun = payload.dryRun === true;
   const root = dshInstallRoot();
@@ -587,6 +635,9 @@ async function handleApply(request, response) {
       cwd: process.cwd(),
     },
     port: servingPort(request),
+    hostPid: process.pid,
+    prefix,
+    installRoot: root,
     stateFile: STATE_FILE,
     logPath,
     dryRun,

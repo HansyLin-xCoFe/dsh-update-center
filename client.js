@@ -45,6 +45,7 @@ window.__ModuleLoader__.load({
       'row.reload': '刷新页面',
       'row.checkError': '检查更新失败：{message}',
       'row.applyError': '更新操作失败：{message}',
+      'row.updatingElsewhere': '另一个更新正在进行（目标 v{version}），结束后刷新页面。',
       'row.lastFailed': '上次更新（v{version}）未完成：{message}',
       'row.lastOk': '上次更新（v{version}）已完成。',
       'row.log': '日志：{path}',
@@ -93,6 +94,7 @@ window.__ModuleLoader__.load({
       'row.reload': 'Reload page',
       'row.checkError': 'Could not check for updates: {message}',
       'row.applyError': 'Update failed: {message}',
+      'row.updatingElsewhere': 'Another update is already running (target v{version}). Reload after it finishes.',
       'row.lastFailed': 'The previous update (v{version}) did not finish: {message}',
       'row.lastOk': 'The previous update (v{version}) finished.',
       'row.log': 'Log: {path}',
@@ -447,6 +449,7 @@ window.__ModuleLoader__.load({
       const checking = state.phase === 'loading' || state.phase === 'refreshing';
       const applying = state.applying;
       const applied = state.applied;
+      const updatingElsewhere = Boolean(status && status.updating) && !applying;
       const releases = status && Array.isArray(status.pending) ? status.pending : [];
       const lastUpdate = status ? status.lastUpdate : null;
       const notesOpen = state.rowNotesOpen;
@@ -500,6 +503,13 @@ window.__ModuleLoader__.load({
               )
             : null,
           applying ? h('div', { className: 'dsu-hint', key: 'applying' }, t('row.applying')) : null,
+          updatingElsewhere
+            ? h(
+                'div',
+                { className: 'dsu-hint', key: 'updating-elsewhere' },
+                t('row.updatingElsewhere', { version: status.updatingVersion ?? latest ?? '' }),
+              )
+            : null,
           applied
             ? h(
                 'div',
@@ -548,7 +558,7 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               className: 'dsu-btn dsu-btn-secondary',
-              disabled: checking || applying,
+              disabled: checking || applying || updatingElsewhere,
               onClick: () => store.refresh(true),
             },
             checking ? t('row.checking') : t('row.check'),
@@ -581,10 +591,10 @@ window.__ModuleLoader__.load({
                   {
                     type: 'button',
                     className: 'dsu-btn dsu-btn-primary',
-                    disabled: applying,
+                    disabled: applying || updatingElsewhere,
                     onClick: () => store.applyUpdate(),
                   },
-                  applying ? t('row.updateBusy') : t('row.update'),
+                  applying || updatingElsewhere ? t('row.updateBusy') : t('row.update'),
                 )
               : null,
         ),
@@ -606,18 +616,21 @@ window.__ModuleLoader__.load({
       const ignored = Boolean(status.ignored);
       const applying = state.applying;
       const applied = state.applied;
-      const visible = !state.dismissed && ((updateAvailable && !ignored) || applying || applied);
+      const updatingElsewhere = Boolean(status.updating) && !applying && !applied;
+      const visible =
+        !state.dismissed &&
+        ((updateAvailable && !ignored) || applying || applied || updatingElsewhere);
       if (!visible) return null;
 
       const releases = Array.isArray(status.pending) ? status.pending : [];
       const notesOpen = state.notesOpen;
       const extra =
-        !applying && !applied && releases.length > 1
+        !applying && !applied && !updatingElsewhere && releases.length > 1
           ? t('prompt.multi', { count: releases.length })
           : '';
 
       const actions = [];
-      if (applying) {
+      if (applying || updatingElsewhere) {
         /* Nothing to click while the update helper runs. */
       } else if (applied) {
         actions.push(
@@ -681,13 +694,13 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'dsu-prompt-title' },
-              applying
+              applying || updatingElsewhere
                 ? t('prompt.titleApplying')
                 : applied
                   ? t('prompt.titleApplied')
                   : t('prompt.title', { version: latest }),
             ),
-            !applying && !applied
+            !applying && !applied && !updatingElsewhere
               ? h(
                   'div',
                   { className: 'dsu-prompt-sub' },
@@ -714,6 +727,10 @@ window.__ModuleLoader__.load({
           state.applyLog
             ? h('div', { className: 'dsu-log', key: 'log' }, t('row.log', { path: state.applyLog }))
             : null,
+        );
+      } else if (updatingElsewhere) {
+        body.push(
+          h('div', { className: 'dsu-muted', key: 'updating-elsewhere' }, t('prompt.applying')),
         );
       } else if (!applied && updateAvailable) {
         if (releases.length > 0) {
