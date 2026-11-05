@@ -18,7 +18,8 @@
                   "npm-invocation.mjs",
                   "cordis.patch.yml",
                   "locale/*.json",
-                  "icon.svg"
+                  "icon.svg",
+                  "README.en.md"
               ],
     "dsh":  {
                 "bundle":  {

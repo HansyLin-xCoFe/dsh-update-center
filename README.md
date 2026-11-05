@@ -1,5 +1,7 @@
 # dsh-update-center
 
+**中文** | [English](README.en.md)
+
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面加一个「更新中心」的插件：
 
 - **设置 → 通用**：新增「DSH 更新」一行，显示当前版本 / 最新版本，支持检查更新、一键更新，
