@@ -11,11 +11,12 @@
  * small durable state file, and the loopback/same-origin fence around writes.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveNpmInvocation } from './npm-invocation.mjs';
 
 const PACKAGE = '@deepseek-ai/dsh';
 const REGISTRY_LATEST_URL = 'https://registry.npmjs.org/@deepseek-ai/dsh/latest';
@@ -112,12 +113,24 @@ function readState() {
   }
 }
 
+/**
+ * Write the state document atomically: the helper writes the same file while
+ * the Host reads it, and a half-written JSON would blank the settings row.
+ * Temp file + rename is atomic on both NTFS and POSIX for same-directory moves.
+ */
 function writeState(next) {
   try {
     mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(STATE_FILE, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    const temp = `${STATE_FILE}.${process.pid}.tmp`;
+    writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    renameSync(temp, STATE_FILE);
   } catch {
     /* A read-only home must not break the UI; the in-memory answer still works. */
+    try {
+      rmSync(`${STATE_FILE}.${process.pid}.tmp`, { force: true });
+    } catch {
+      /* nothing left to clean */
+    }
   }
   return next;
 }
@@ -623,12 +636,13 @@ async function handleApply(request, response) {
   const npmArgs = ['install', '-g', '--no-fund', '--no-audit'];
   if (prefix) npmArgs.push('--prefix', prefix);
   npmArgs.push(`${PACKAGE}@${target}`);
+  const npmInvocation = resolveNpmInvocation({ execPath: process.execPath, args: npmArgs });
   const plan = {
     createdAt: new Date().toISOString(),
     package: PACKAGE,
     current: status.current,
     target,
-    npm: { command: process.platform === 'win32' ? 'npm.cmd' : 'npm', args: npmArgs },
+    npm: npmInvocation,
     launch: {
       file: process.execPath,
       args: process.argv.slice(1),

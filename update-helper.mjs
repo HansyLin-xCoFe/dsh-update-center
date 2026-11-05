@@ -37,6 +37,7 @@ import {
 } from 'node:fs';
 import { createConnection } from 'node:net';
 import { dirname, join } from 'node:path';
+import { resolveNpmForPlan } from './npm-invocation.mjs';
 
 /* ------------------------------------------------------------------ *
  * Plan + constants                                                   *
@@ -56,8 +57,17 @@ const isWindows = process.platform === 'win32';
 const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
 const stateFile = plan.stateFile;
 const lockFile = join(dirname(stateFile), 'update.lock');
-const npmCommand = (plan.npm && plan.npm.command) || (isWindows ? 'npm.cmd' : 'npm');
-const npmArgs = Array.isArray(plan.npm && plan.npm.args) ? plan.npm.args.slice() : [];
+
+/*
+ * npm invocation. A plan written by an older Host half carries
+ * `command: 'npm.cmd'`; such a plan cannot be spawned from this console-less
+ * helper (cmd.exe dies with ERROR_NETNAME_DELETED). npm-invocation rewrites it
+ * to the form that is proven to work — node + npm-cli.js, no shell — so an
+ * already-queued plan does not need a Host restart to succeed.
+ */
+const npmInvocation = resolveNpmForPlan(plan.npm, { execPath: process.execPath });
+const npmCommand = npmInvocation.command;
+const npmArgs = npmInvocation.args;
 const launch = plan.launch;
 const port = Number.isInteger(plan.port) && plan.port > 0 ? plan.port : null;
 const FREE_SPACE_MIN_BYTES = 1.2 * 1024 * 1024 * 1024;
@@ -90,6 +100,7 @@ function readState() {
   }
 }
 
+/** Atomic state write: the Host reads this file while we update it. */
 function patchState(patch) {
   const current = readState();
   const next = {
@@ -101,10 +112,17 @@ function patchState(patch) {
       ...patch,
     },
   };
+  const temp = `${stateFile}.${process.pid}.tmp`;
   try {
-    writeFileSync(stateFile, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    renameSync(temp, stateFile);
   } catch {
     /* state is a convenience, not a requirement */
+    try {
+      rmSync(temp, { force: true });
+    } catch {
+      /* nothing to clean */
+    }
   }
 }
 
@@ -245,12 +263,17 @@ async function waitForPidGone(pid, timeoutMs) {
   return !pidAlive(pid);
 }
 
-function forceKillTree(pid) {
+/**
+ * Terminate one specific PID. `includeTree` is only for a replacement Host that
+ * this helper itself started (it is not the helper's ancestor), never for the
+ * old Host.
+ */
+function forceKillPid(pid, includeTree = false) {
   if (!Number.isInteger(pid) || pid <= 0) return;
-  log(`forcing pid ${pid} to stop`);
+  log(`forcing pid ${pid} to stop${includeTree ? ' (its own subtree)' : ' (that process only)'}`);
   try {
     if (isWindows) {
-      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+      spawnSync('taskkill', ['/PID', String(pid), ...(includeTree ? ['/T'] : []), '/F'], {
         encoding: 'utf8',
         windowsHide: true,
       });
@@ -330,10 +353,15 @@ function runInstall() {
       env: process.env,
     };
     try {
-      if (plan.npm && plan.npm.shell === false) {
+      if (npmInvocation.shell === false) {
+        /* The supported path: node + npm-cli.js, no shell, no console needed. */
         child = spawn(npmCommand, npmArgs, options);
       } else if (isWindows && /\.(cmd|bat)$/iu.test(npmCommand)) {
-        /* cmd shims need a shell; explicit cmd.exe avoids the DEP0190 warning. */
+        /*
+         * Fallback only (no npm-cli.js found). cmd.exe needs a console and this
+         * helper has none, so this path is known to fail on some Windows hosts;
+         * the log line above names the fallback so a failure is diagnosable.
+         */
         const line = [npmCommand, ...npmArgs]
           .map((part) => `"${String(part).replace(/"/gu, '""')}"`)
           .join(' ');
@@ -406,10 +434,25 @@ function launchHost() {
   }
 }
 
+/**
+ * A replacement counts as up only after the port answers CONTINUOUSLY for
+ * SETTLE_MS: DSH binds the web port before its activation audit runs, so a
+ * single successful probe can belong to a harness that is about to exit.
+ */
 async function waitForStartup(timeoutMs) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (await isListening()) return true;
+  const settleMs = 6000;
+  const deadline = Date.now() + timeoutMs;
+  let listeningSince = null;
+  while (Date.now() < deadline) {
+    if (await isListening()) {
+      if (listeningSince === null) {
+        listeningSince = Date.now();
+      } else if (Date.now() - listeningSince >= settleMs) {
+        return true;
+      }
+    } else {
+      listeningSince = null;
+    }
     await sleep(500);
   }
   return false;
@@ -480,32 +523,31 @@ async function main() {
   }
   if (hostPid !== null) {
     log(`old host pid: ${hostPid}`);
-    if (!(await waitForPidGone(hostPid, 20000))) forceKillTree(hostPid);
-    if (!(await waitForPidGone(hostPid, 15000))) {
-      log(`old host pid ${hostPid} is still alive; refusing to install over a running DSH`);
+    /*
+     * Never force-kill the old Host from here. In the ordinary /apply flow the
+     * helper IS a child of that Host; on Windows terminating the Host takes the
+     * helper with it (the 2026-11-05 10:46 controlled downgrade aborted exactly
+     * this way: taskkill killed both, DSH stayed down). Aborting is the safe
+     * outcome: nothing was changed and the user can restart DSH at will.
+     */
+    if (!(await waitForPidGone(hostPid, 35000))) {
+      log(`old host pid ${hostPid} is still alive; aborting without touching the installation`);
       patchState({
         phase: 'failed',
         ok: false,
-        error: '旧 DSH 进程未能停止，已取消更新（未改动安装）',
+        error: '旧 DSH 进程未退出，已取消更新（未改动安装）。请先重启 DSH 再重试。',
         finishedAt: new Date().toISOString(),
       });
       process.exit(1);
     }
   } else {
     log('no old host pid; waiting for the port to free');
-    if (!(await waitForPortFree(20000))) {
-      const lingering = findListenerPid(port);
-      if (lingering !== null) {
-        forceKillTree(lingering);
-        await sleep(1000);
-      }
-    }
-    if (!(await waitForPortFree(10000))) {
-      log('the web port is still in use; refusing to install');
+    if (!(await waitForPortFree(30000))) {
+      log('the web port is still in use; aborting without touching the installation');
       patchState({
         phase: 'failed',
         ok: false,
-        error: 'Web 端口仍被占用，已取消更新（未改动安装）',
+        error: 'Web 端口仍被占用，已取消更新（未改动安装）。请先重启 DSH 再重试。',
         finishedAt: new Date().toISOString(),
       });
       process.exit(1);
@@ -566,7 +608,7 @@ async function main() {
 
   /* 4. Install. */
   patchState({ phase: 'installing' });
-  log(`running ${npmCommand} ${npmArgs.join(' ')}`);
+  log(`running npm via ${npmInvocation.via}${npmInvocation.rewritten ? '（已改写旧计划的 npm 调用方式）' : ''}: ${npmCommand} ${npmArgs.join(' ')}`);
   const npm = await runInstall();
   const installOk = npm.code === 0;
   log(`npm finished with code ${String(npm.code)}${npm.error ? ` (${npm.error.message})` : ''}`);
@@ -606,7 +648,7 @@ async function main() {
   let up = await waitForStartup(STARTUP_TIMEOUT_MS);
   if (!up && backedUp) {
     log('the new version did not come up within 120s; rolling back');
-    forceKillTree(findListenerPid(port));
+    forceKillPid(findListenerPid(port), true);
     await sleep(1000);
     if (restoreBackup()) {
       launchHost();

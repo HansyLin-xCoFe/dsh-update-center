@@ -1,12 +1,13 @@
 {
     "name":  "dsh-update-center",
-    "version":  "1.1.0",
+    "version":  "1.2.0",
     "private":  true,
     "description":  "Check DSH releases, read the highlights, and update to the latest version with one click — from Settings → General or the bottom-left prompt.",
     "type":  "module",
     "exports":  {
                     ".":  "./index.js",
                     "./client":  "./client.js",
+                    "./npm-invocation":  "./npm-invocation.mjs",
                     "./locale/*.json":  "./locale/*.json",
                     "./icon":  "./icon.svg"
                 },
@@ -14,6 +15,7 @@
                   "index.js",
                   "client.js",
                   "update-helper.mjs",
+                  "npm-invocation.mjs",
                   "cordis.patch.yml",
                   "locale/*.json",
                   "icon.svg"

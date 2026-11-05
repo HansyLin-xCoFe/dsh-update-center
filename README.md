@@ -25,15 +25,24 @@ GitHub 不可达时仍会提示更新，只是「更新重点」显示为空。
 
 1. 点击后 Host 把更新计划写到 `~/.dsh/dsh-update/plans/`，启动 detached 更新助手，然后自己退出；
 2. 助手先拿 `update.lock` 独占锁——**同一时间只允许一个更新进程**，已有更新在跑时直接退出（宿主 `/apply` 也会返回 409）；
-3. 确认旧 Host 进程真的退出（用 PID / 端口定位；不退出就强制结束，仍不退则**放弃安装、不改任何文件**）；
-4. 把当前全局安装目录重命名成 `dsh.bak-<时间戳>` 作为备份，然后执行
-   `npm install -g --no-fund --no-audit --prefix <npm 全局前缀> @deepseek-ai/dsh@<最新版本>`；
+3. 确认旧 Host 进程真的退出（用 PID / 端口定位；不退出就**放弃安装、不改任何文件**，
+   因为助手本身是旧 Host 的子进程，强杀父进程会连坐自己）；
+4. 把当前全局安装目录重命名成 `dsh.bak-<时间戳>` 作为备份，然后执行全局安装
+   `node <npm-cli.js> install -g --no-fund --no-audit --prefix <npm 全局前缀> @deepseek-ai/dsh@<最新版本>`；
 5. 安装后验证 `<安装目录>/lib/bin.js` 存在：失败就删掉不完整的新树、把备份改回来，并拉起旧版本；
-6. 拉起新版本并轮询端口；120 秒内起不来同样回滚到旧版本；
+6. 拉起新版本并轮询端口，**连续监听 6 秒**才算成功（DSH 会先绑端口再做启动审计）；120 秒内起不来同样回滚；
 7. 成功后才删除备份、释放锁。页面断线后由 DSH 自带连接恢复自动重连，新版本 Host 返回时内置的
    「服务版本变化」对话框会提示刷新，刷新即进入新版本。
 
-另外还有这些护栏：安装盘剩余空间 < 1.2 GiB 时拒绝更新；npm 有 15 分钟超时；状态阶段全程写
+### npm 为什么要用 `node + npm-cli.js` 而不是 `npm.cmd`
+
+更新助手是没有控制台的 detached 进程。在这种环境里 spawn Windows 的 `npm.cmd` 会立刻失败并打印
+`指定的网络名不再可用。`（`ERROR_NETNAME_DELETED`），npm 一行都没跑——2026-11-05 的 11:17 与 11:37
+两次更新都是这么失败的（同样的命令在普通终端里正常）。改用 `node <nodejs>/node_modules/npm/bin/npm-cli.js`
+（`shell: false`）后一次成功：`added 616 packages in 1m`。
+`npm-invocation.mjs` 负责这个选择，Host 与助手共用；旧版本 Host 写下的 `npm.cmd` 计划也会被助手自动改写。
+
+另外还有这些护栏：安装盘剩余空间 < 1.2 GiB 时拒绝更新；npm 有 15 分钟超时；状态阶段全程**原子写入**
 `state.json`（`waiting-host-exit` → `backing-up` → `installing` → `restarting` → `done` / `rolled-back`）；
 设置行和左下角弹窗在「另一个更新正在进行」时禁用按钮并显示提示。
 
@@ -82,7 +91,11 @@ plugin/
 
 ## 更新记录
 
-- **1.1.0**（2026-11-05）：安全加固 —— 单实例锁、旧进程退出校验/强制结束、安装目录先备份后安装、
+- **1.2.0**（2026-11-05）：修好「一键更新在无控制台环境下起不来 npm」的根因 —— 改用
+  `node + npm-cli.js`（`shell:false`）而不是 `npm.cmd`，并让助手自动改写旧版本 Host 写下的
+  `npm.cmd` 计划；`state.json` 改为原子写入；新增 npm 调用方式、锁竞争、回滚、宿主不退出等
+  19 项回归测试。
+- **1.1.0**（2026-11-05）：安全加固 —— 单实例锁、旧进程退出校验、安装目录先备份后安装、
   安装失败与启动失败自动回滚、磁盘空间检查、npm 超时，以及「另一个更新正在进行」的 UI 提示。
   修复 2026-11-05 两个并发 `npm install -g` 删掉全局安装的事故（复盘见
   `projects/dsh-update-center/docs/incident-2026-11-05-global-install-deleted.md`）。
