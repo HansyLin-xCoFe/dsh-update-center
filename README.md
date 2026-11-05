@@ -107,8 +107,7 @@ plugin/
 
 本项目的插件代码、文档、验证与发布流程，全部由 **DeepSeek-V4.1-Flash** 与 **DeepSeek Harness** 完成。
 
-感谢 [@核动力浅水重炮舰](https://github.com/a1179162858-collab) 提供的 token —— 首次发布与 v1.2.0
-版本推送靠它完成。
+感谢 **@核动力浅水重炮舰** 提供的 token —— 首次发布与 v1.2.0 版本推送靠它完成。
 
 ## License
 
