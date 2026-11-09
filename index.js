@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveNpmInvocation } from './npm-invocation.mjs';
 
@@ -377,6 +377,20 @@ function activeUpdate() {
   return stale ? null : lock;
 }
 
+/**
+ * A staged tree recorded by stage-helper, only when its lib/bin.js is still on
+ * disk. `null` means "nothing ready to switch to".
+ */
+function preparedUpdate() {
+  const state = readState();
+  const staged = state.staged && typeof state.staged === 'object' ? state.staged : null;
+  if (staged === null) return null;
+  if (typeof staged.version !== 'string' || typeof staged.dir !== 'string') return null;
+  const bin = join(staged.dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+  if (!existsSync(bin)) return null;
+  return staged;
+}
+
 /* ---------------- *
  * Status assembly  *
  * ---------------- */
@@ -445,6 +459,7 @@ async function buildStatus(force) {
     current !== null && latest !== null && compareVersions(latest, current) > 0;
   const latestRelease = pending.find((release) => release.version === latest) ?? null;
   const running = activeUpdate();
+  const prepared = preparedUpdate();
 
   return {
     package: PACKAGE,
@@ -453,7 +468,10 @@ async function buildStatus(force) {
     channel: 'latest',
     updateAvailable,
     updating: running !== null,
+    updatePhase: running === null ? null : (running.mode ?? null),
+    updateTarget: running === null ? null : (running.target ?? null),
     updatingVersion: running === null ? null : (running.target ?? null),
+    prepared: prepared === null ? null : { version: prepared.version, at: prepared.at ?? null },
     ignoredVersion: typeof state.ignoredVersion === 'string' ? state.ignoredVersion : null,
     ignored: latest !== null && state.ignoredVersion === latest,
     pending,
@@ -626,19 +644,43 @@ async function handleApply(request, response) {
     return;
   }
   const target = status.latest;
+  const prepared = preparedUpdate();
+  if (prepared !== null && prepared.version === target) {
+    sendJson(response, 200, {
+      started: false,
+      prepared: true,
+      target,
+      message: '新版本已下载并校验完成，可以重启并应用',
+    });
+    return;
+  }
   const dryRun = payload.dryRun === true;
   const root = dshInstallRoot();
   const prefix = installPrefix(root);
+  if (root === null || prefix === null) {
+    sendJson(response, 500, { error: '无法定位 DSH 的全局安装目录' });
+    return;
+  }
   const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
   mkdirSync(LOG_DIR, { recursive: true });
   mkdirSync(PLAN_DIR, { recursive: true });
-  const logPath = join(LOG_DIR, `update-${stamp}.log`);
-  const npmArgs = ['install', '-g', '--no-fund', '--no-audit'];
-  if (prefix) npmArgs.push('--prefix', prefix);
-  npmArgs.push(`${PACKAGE}@${target}`);
+  const logPath = join(LOG_DIR, `stage-${stamp}.log`);
+  const stageRoot = join(prefix, `.dsh-stage-${stamp}`);
+  const npmArgs = [
+    'install',
+    '-g',
+    '--no-fund',
+    '--no-audit',
+    '--fetch-timeout=60000',
+    '--fetch-retries=5',
+    '--prefix',
+    stageRoot,
+    `${PACKAGE}@${target}`,
+  ];
   const npmInvocation = resolveNpmInvocation({ execPath: process.execPath, args: npmArgs });
   const plan = {
     createdAt: new Date().toISOString(),
+    mode: 'stage',
     package: PACKAGE,
     current: status.current,
     target,
@@ -651,17 +693,17 @@ async function handleApply(request, response) {
     port: servingPort(request),
     hostPid: process.pid,
     prefix,
-    installRoot: root,
+    liveRoot: root,
+    stageRoot,
     stateFile: STATE_FILE,
     logPath,
     dryRun,
   };
-  const planPath = join(PLAN_DIR, `plan-${stamp}.json`);
+  const planPath = join(PLAN_DIR, `stage-${stamp}.json`);
   try {
     writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`, 'utf8');
   } catch (cause) {
-    /* A plan we cannot persist cannot be replayed after the host exits. */
-    sendJson(response, 500, { error: `无法写入更新计划：${describeError(cause)}` });
+    sendJson(response, 500, { error: `无法写入下载计划：${describeError(cause)}` });
     return;
   }
   if (dryRun) {
@@ -669,15 +711,16 @@ async function handleApply(request, response) {
       started: false,
       dryRun: true,
       target,
+      stageRoot,
       logPath,
       planPath,
       command: [plan.npm.command, ...plan.npm.args].join(' '),
     });
     return;
   }
-  const helperPath = fileURLToPath(new URL('./update-helper.mjs', import.meta.url));
+  const helperPath = fileURLToPath(new URL('./stage-helper.mjs', import.meta.url));
   if (!existsSync(helperPath)) {
-    sendJson(response, 500, { error: '更新助手脚本缺失，未做任何改动' });
+    sendJson(response, 500, { error: '下载助手脚本缺失，未做任何改动' });
     return;
   }
   let child;
@@ -691,27 +734,136 @@ async function handleApply(request, response) {
     child.on('error', () => {});
     child.unref();
   } catch (cause) {
-    sendJson(response, 500, { error: `无法启动更新助手：${describeError(cause)}` });
+    sendJson(response, 500, { error: `无法启动下载助手：${describeError(cause)}` });
     return;
   }
   patchState({
     lastUpdate: {
       version: target,
       at: plan.createdAt,
-      phase: 'starting',
+      phase: 'staging',
       ok: null,
       logPath,
     },
   });
   sendJson(response, 200, {
     started: true,
+    phase: 'stage',
+    target,
+    from: status.current,
+    stageRoot,
+    logPath,
+    planPath,
+    helperPid: child.pid ?? null,
+  });
+}
+
+/**
+ * Phase 2: swap the verified staging tree into place. The Host answers, then
+ * exits; switch-helper does the stop -> rename -> start sequence and rolls back
+ * on failure. This is the same shape as the manual restore that took ~8s.
+ */
+async function handleSwitch(request, response) {
+  if (!trustedRequest(request)) {
+    sendJson(response, 403, { error: '这个请求来源不受信任' });
+    return;
+  }
+  if (request.method !== 'POST') {
+    methodNotAllowed(response, 'POST');
+    return;
+  }
+  const prepared = preparedUpdate();
+  if (prepared === null) {
+    sendJson(response, 409, { error: '还没有下载好的新版本，请先点“检查更新”下载' });
+    return;
+  }
+  const status = await buildStatus(false);
+  if (status.current === prepared.version) {
+    patchState({ staged: null });
+    sendJson(response, 409, { error: `当前已经是 v${prepared.version}` });
+    return;
+  }
+  const running = activeUpdate();
+  if (running !== null) {
+    sendJson(response, 409, {
+      error: `已有更新正在进行（PID ${running.pid}），请等待它结束`,
+    });
+    return;
+  }
+  const target = prepared.version;
+  const root = dshInstallRoot();
+  if (root === null) {
+    sendJson(response, 500, { error: '无法定位 DSH 的全局安装目录' });
+    return;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
+  mkdirSync(LOG_DIR, { recursive: true });
+  mkdirSync(PLAN_DIR, { recursive: true });
+  const logPath = join(LOG_DIR, `switch-${stamp}.log`);
+  const backupDir = join(dirname(root), `dsh.bak-${stamp}`);
+  const plan = {
+    createdAt: new Date().toISOString(),
+    mode: 'switch',
+    package: PACKAGE,
+    target,
+    npm: {},
+    launch: {
+      file: process.execPath,
+      args: process.argv.slice(1),
+      cwd: process.cwd(),
+    },
+    port: servingPort(request),
+    hostPid: process.pid,
+    liveRoot: root,
+    stageRoot: prepared.dir,
+    backupDir,
+    stateFile: STATE_FILE,
+    logPath,
+  };
+  const planPath = join(PLAN_DIR, `switch-${stamp}.json`);
+  try {
+    writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`, 'utf8');
+  } catch (cause) {
+    sendJson(response, 500, { error: `无法写入切换计划：${describeError(cause)}` });
+    return;
+  }
+  const helperPath = fileURLToPath(new URL('./switch-helper.mjs', import.meta.url));
+  if (!existsSync(helperPath)) {
+    sendJson(response, 500, { error: '切换助手脚本缺失，未做任何改动' });
+    return;
+  }
+  let child;
+  try {
+    child = spawn(process.execPath, [helperPath, planPath], {
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+      windowsHide: true,
+    });
+    child.on('error', () => {});
+    child.unref();
+  } catch (cause) {
+    sendJson(response, 500, { error: `无法启动切换助手：${describeError(cause)}` });
+    return;
+  }
+  patchState({
+    lastUpdate: {
+      version: target,
+      at: plan.createdAt,
+      phase: 'switching',
+      ok: null,
+      logPath,
+    },
+  });
+  sendJson(response, 200, {
+    started: true,
+    phase: 'switch',
     target,
     from: status.current,
     logPath,
     planPath,
     helperPid: child.pid ?? null,
   });
-  /* Let the response flush, then hand the process over to the helper. */
   const timer = setTimeout(() => {
     try {
       process.kill(process.pid, 'SIGTERM');
@@ -754,6 +906,14 @@ function apply(ctx) {
             path: '/dsh-update/apply',
             handler: (request, response) =>
               handleApply(request, response).catch((cause) =>
+                sendJson(response, 500, { error: describeError(cause) }),
+              ),
+          }),
+          hostCtx.webServer.register({
+            kind: 'exact',
+            path: '/dsh-update/switch',
+            handler: (request, response) =>
+              handleSwitch(request, response).catch((cause) =>
                 sendJson(response, 500, { error: describeError(cause) }),
               ),
           }),

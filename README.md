@@ -23,18 +23,28 @@
 更新说明来自 `github.com/deepseek-ai/deepseek-harness` 的 `dsh-v*` Release 正文；只解析中文段落。
 GitHub 不可达时仍会提示更新，只是「更新重点」显示为空。
 
-## 一键更新是怎么做的
+## 一键更新是怎么做的（v1.3.0：先下载到隔离目录，再本地切换）
 
-1. 点击后 Host 把更新计划写到 `~/.dsh/dsh-update/plans/`，启动 detached 更新助手，然后自己退出；
-2. 助手先拿 `update.lock` 独占锁——**同一时间只允许一个更新进程**，已有更新在跑时直接退出（宿主 `/apply` 也会返回 409）；
-3. 确认旧 Host 进程真的退出（用 PID / 端口定位；不退出就**放弃安装、不改任何文件**，
-   因为助手本身是旧 Host 的子进程，强杀父进程会连坐自己）；
-4. 把当前全局安装目录重命名成 `dsh.bak-<时间戳>` 作为备份，然后执行全局安装
-   `node <npm-cli.js> install -g --no-fund --no-audit --prefix <npm 全局前缀> @deepseek-ai/dsh@<最新版本>`；
-5. 安装后验证 `<安装目录>/lib/bin.js` 存在：失败就删掉不完整的新树、把备份改回来，并拉起旧版本；
-6. 拉起新版本并轮询端口，**连续监听 6 秒**才算成功（DSH 会先绑端口再做启动审计）；120 秒内起不来同样回滚；
-7. 成功后才删除备份、释放锁。页面断线后由 DSH 自带连接恢复自动重连，新版本 Host 返回时内置的
-   「服务版本变化」对话框会提示刷新，刷新即进入新版本。
+更新分成两个阶段，**联网安装永远不碰正在运行的安装目录**：
+
+**阶段 1 — 下载并校验（DSH 照常使用）**
+
+1. 点「检查更新 / 更新」后，Host 把计划写到 `~/.dsh/dsh-update/plans/`，启动 detached 的
+   `stage-helper.mjs`，自己**不退出**；
+2. helper 拿 `update.lock` 独占锁，执行
+   `node <npm-cli.js> install -g --no-fund --no-audit --fetch-timeout=60000 --fetch-retries=5 --prefix <隔离目录> @deepseek-ai/dsh@<最新版本>`；
+3. 下载有进度就自动续期，**10 分钟无输出或累计 45 分钟**才判定卡死，并 `taskkill /T /F` 杀掉整棵 npm 进程树；
+4. 校验隔离目录里的 `lib/bin.js`、`package.json` 版本，并跑一次 `node bin.js --version`；
+   失败就删掉隔离目录——**正式安装一个字节都没动，DSH 也不停**；
+5. 成功后在 `state.json` 记录 `staged: { version, dir }`，页面出现「新版本已就绪」和
+   **「重启并应用」**按钮（这就是你要求的“点一下再切换”）。
+
+**阶段 2 — 切换（几秒钟，和手动回滚同一套动作）**
+
+1. 你点「重启并应用」→ `switch-helper.mjs` 拿锁，确认旧 Host 进程已退出（不退出就放弃、不改任何文件）；
+2. 当前安装目录改名成 `dsh.bak-<时间戳>`（保留），隔离目录里的 `dsh` 改名进正式位置；
+3. 启动新版本，要求**连续监听 6 秒**才算成功；
+4. 起不来 → 杀掉新进程 → 把备份改回来 → 拉起旧版本，`state.json` 记 `rolled-back`。
 
 ### npm 为什么要用 `node + npm-cli.js` 而不是 `npm.cmd`
 
@@ -42,15 +52,19 @@ GitHub 不可达时仍会提示更新，只是「更新重点」显示为空。
 `指定的网络名不再可用。`（`ERROR_NETNAME_DELETED`），npm 一行都没跑——2026-11-05 的 11:17 与 11:37
 两次更新都是这么失败的（同样的命令在普通终端里正常）。改用 `node <nodejs>/node_modules/npm/bin/npm-cli.js`
 （`shell: false`）后一次成功：`added 616 packages in 1m`。
-`npm-invocation.mjs` 负责这个选择，Host 与助手共用；旧版本 Host 写下的 `npm.cmd` 计划也会被助手自动改写。
+`npm-invocation.mjs` 负责这个选择，Host 与两个 helper 共用。
 
-另外还有这些护栏：安装盘剩余空间 < 1.2 GiB 时拒绝更新；npm 有 15 分钟超时；状态阶段全程**原子写入**
-`state.json`（`waiting-host-exit` → `backing-up` → `installing` → `restarting` → `done` / `rolled-back`）；
-设置行和左下角弹窗在「另一个更新正在进行」时禁用按钮并显示提示。
+为什么不再“就地安装”：2026-11-09 的更新就是 npm 下载卡住 15 分钟被强杀，随后删半成品目录和
+还原备份都遇到 `EPERM`，把 DSH 留在缺失状态。隔离安装让这类环境问题最多变成“这次没更新成功”。
 
-日志：`~/.dsh/dsh-update/logs/update-*.log`；状态：`~/.dsh/dsh-update/state.json`
-（`DSH_HOME` 存在时以它为准）。安全回归测试：`node scripts/helper-safety-tests.mjs`
-（在系统临时目录里用假安装树/假 npm 跑，不接触真实 DSH）。
+其他护栏：隔离安装需要约 2 GiB 空间（不足直接拒绝）；`state.json` 全程**原子写入**；
+设置行和左下角弹窗在下载/切换期间禁用按钮并显示进度。
+
+日志：`~/.dsh/dsh-update/logs/stage-*.log`、`switch-*.log`；状态：`~/.dsh/dsh-update/state.json`
+（`DSH_HOME` 存在时以它为准）。回归测试：
+`node scripts/helper-safety-tests.mjs`（19 项，旧就地助手）与
+`node scripts/staged-update-tests.mjs`（17 项，隔离安装 + 切换 + 回滚），都在系统临时目录里跑，
+不接触真实 DSH。
 
 ## 安装
 
@@ -93,6 +107,10 @@ plugin/
 
 ## 更新记录
 
+- **1.3.0**（2026-11-09）：更新改为**隔离安装 + 手动切换**。下载/校验在独立的 `.dsh-stage-*` 目录完成，
+  DSH 继续运行；校验通过后页面出现「重启并应用」，切换只做本地改名（约 10 秒），失败自动换回旧版本。
+  联网安装不再触碰正式安装目录，网络卡死/半成品/EPERM 最多导致“这次没更新成功”，不会再删坏 DSH。
+  新增 `stage-helper.mjs`、`switch-helper.mjs`、`update-common.mjs`，回归测试 17 项。
 - **1.2.0**（2026-11-05）：修好「一键更新在无控制台环境下起不来 npm」的根因 —— 改用
   `node + npm-cli.js`（`shell:false`）而不是 `npm.cmd`，并让助手自动改写旧版本 Host 写下的
   `npm.cmd` 计划；`state.json` 改为原子写入；新增 npm 调用方式、锁竞争、回滚、宿主不退出等

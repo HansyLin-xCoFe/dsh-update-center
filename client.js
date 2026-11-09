@@ -42,6 +42,9 @@ window.__ModuleLoader__.load({
       'row.notesHide': '收起更新重点',
       'row.applying': '正在下载并安装更新，DSH 会重启，页面将自动重连…',
       'row.applied': '已更新到 v{version}，刷新页面后即可使用新版本。',
+      'row.prepared': '新版本 v{version} 已下载并校验完成，重启即可应用。',
+      'row.stageApplying': '正在下载新版本…（不影响当前使用）',
+      'row.applyNow': '重启并应用',
       'row.reload': '刷新页面',
       'row.checkError': '检查更新失败：{message}',
       'row.applyError': '更新操作失败：{message}',
@@ -63,6 +66,11 @@ window.__ModuleLoader__.load({
       'prompt.close': '关闭',
       'prompt.applying': '正在下载并安装更新，DSH 会重启，页面将自动重连…',
       'prompt.applied': '已更新到 v{version}，刷新页面即可使用新版本。',
+      'prompt.preparedTitle': '新版本 v{version} 已就绪',
+      'prompt.preparedSub': '已下载并校验完成，重启后生效。',
+      'prompt.applyNow': '立即重启并应用',
+      'prompt.staging': '正在下载新版本…（不影响使用）',
+      'prompt.stagingTitle': '正在下载新版本…',
       'prompt.reload': '刷新页面',
       'prompt.error': '更新未能启动：{message}',
       'prompt.ignored': '已忽略 v{version}',
@@ -91,6 +99,9 @@ window.__ModuleLoader__.load({
       'row.notesHide': 'Hide release highlights',
       'row.applying': 'Downloading and installing the update. DSH will restart and this page reconnects automatically…',
       'row.applied': 'Updated to v{version}. Reload the page to use the new version.',
+      'row.prepared': 'v{version} is downloaded and verified — restart to apply.',
+      'row.stageApplying': 'Downloading the new version… (DSH keeps working)',
+      'row.applyNow': 'Restart & apply',
       'row.reload': 'Reload page',
       'row.checkError': 'Could not check for updates: {message}',
       'row.applyError': 'Update failed: {message}',
@@ -112,6 +123,11 @@ window.__ModuleLoader__.load({
       'prompt.close': 'Close',
       'prompt.applying': 'Downloading and installing the update. DSH will restart and this page reconnects automatically…',
       'prompt.applied': 'Updated to v{version}. Reload the page to use the new version.',
+      'prompt.preparedTitle': 'v{version} is ready',
+      'prompt.preparedSub': 'Downloaded and verified — restart to apply.',
+      'prompt.applyNow': 'Restart & apply',
+      'prompt.staging': 'Downloading the new version… (DSH keeps working)',
+      'prompt.stagingTitle': 'Downloading the new version…',
       'prompt.reload': 'Reload page',
       'prompt.error': 'Could not start the update: {message}',
       'prompt.ignored': 'Ignoring v{version}',
@@ -372,6 +388,7 @@ window.__ModuleLoader__.load({
           }
         },
 
+        /** Phase 1: download + verify a new tree into staging (DSH keeps running). */
         async applyUpdate() {
           if (state.applying) return;
           set({ applying: true, applied: false, dismissed: false, applyError: null, error: null });
@@ -382,34 +399,71 @@ window.__ModuleLoader__.load({
               body: JSON.stringify({}),
             });
             set({ applyLog: data.logPath ?? null });
-            store.startPoll();
+            if (data.prepared === true) {
+              set({ applying: false, staged: true });
+              await store.refresh(false);
+              return;
+            }
+            store.startPoll('stage', data.target ?? null);
           } catch (error) {
             set({ applying: false, applyError: errorMessage(error) });
           }
         },
 
-        startPoll() {
+        /** Phase 2: swap the verified staging tree in and restart DSH (~10s). */
+        async applyPrepared() {
+          const status = state.status;
+          const target = status && status.prepared ? status.prepared.version : null;
+          if (state.applying || target === null) return;
+          set({ applying: true, applied: false, dismissed: false, applyError: null, error: null, staged: false });
+          try {
+            await request(ENDPOINT + '/switch', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+            store.startPoll('switch', target);
+          } catch (error) {
+            set({ applying: false, applyError: errorMessage(error) });
+          }
+        },
+
+        startPoll(phase, target) {
           stopPoll();
           const startedAt = Date.now();
+          const limit = phase === 'stage' ? 45 * 60 * 1000 : POLL_LIMIT_MS;
           pollTimer = setInterval(async () => {
             if (disposed) {
               stopPoll();
               return;
             }
-            if (Date.now() - startedAt > POLL_LIMIT_MS) {
+            if (Date.now() - startedAt > limit) {
               stopPoll();
+              set({ applying: false });
               return;
             }
             try {
               const data = await request(ENDPOINT + '/status');
               if (disposed) return;
               set({ status: data, phase: 'ready', error: null });
-              if (data.updateAvailable === false && data.current !== null && data.current === data.latest) {
+              const last = data.lastUpdate ?? {};
+              if (phase === 'stage') {
+                if (data.prepared && (target === null || data.prepared.version === target)) {
+                  stopPoll();
+                  set({ applying: false, staged: true });
+                } else if (last.phase === 'stage-failed' || last.phase === 'stage-rejected') {
+                  stopPoll();
+                  set({ applying: false, applyError: last.error ?? '新版本下载失败' });
+                }
+              } else if (data.current !== null && target !== null && data.current === target) {
                 stopPoll();
-                set({ applying: false, applied: true });
+                set({ applying: false, applied: true, staged: false });
+              } else if (last.phase === 'rolled-back' || last.phase === 'switch-failed') {
+                stopPoll();
+                set({ applying: false, applyError: last.error ?? '切换新版本失败' });
               }
             } catch {
-              /* the host is restarting; keep waiting */
+              /* the host is restarting after the switch; keep waiting */
             }
           }, POLL_INTERVAL_MS);
         },
@@ -449,7 +503,12 @@ window.__ModuleLoader__.load({
       const checking = state.phase === 'loading' || state.phase === 'refreshing';
       const applying = state.applying;
       const applied = state.applied;
-      const updatingElsewhere = Boolean(status && status.updating) && !applying;
+      const updatePhase = status ? status.updatePhase : null;
+      const busy = Boolean(status && status.updating) && !applying;
+      const updatingElsewhere = busy && updatePhase !== 'stage';
+      const staging = busy && updatePhase === 'stage';
+      const prepared = status && status.prepared ? status.prepared : null;
+      const preparedReady = prepared !== null && current !== null && prepared.version !== current;
       const releases = status && Array.isArray(status.pending) ? status.pending : [];
       const lastUpdate = status ? status.lastUpdate : null;
       const notesOpen = state.rowNotesOpen;
@@ -503,6 +562,14 @@ window.__ModuleLoader__.load({
               )
             : null,
           applying ? h('div', { className: 'dsu-hint', key: 'applying' }, t('row.applying')) : null,
+          staging ? h('div', { className: 'dsu-hint', key: 'staging' }, t('row.stageApplying')) : null,
+          preparedReady
+            ? h(
+                'div',
+                { className: 'dsu-hint', key: 'prepared' },
+                t('row.prepared', { version: prepared.version }),
+              )
+            : null,
           updatingElsewhere
             ? h(
                 'div',
@@ -558,18 +625,18 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               className: 'dsu-btn dsu-btn-secondary',
-              disabled: checking || applying || updatingElsewhere,
+              disabled: checking || applying || busy,
               onClick: () => store.refresh(true),
             },
             checking ? t('row.checking') : t('row.check'),
           ),
-          updateAvailable && !ignored
+          updateAvailable && !ignored && !preparedReady
             ? h(
                 'button',
                 {
                   type: 'button',
                   className: 'dsu-btn dsu-btn-ghost',
-                  disabled: applying || state.ignoreBusy,
+                  disabled: applying || busy || state.ignoreBusy,
                   onClick: () => store.setIgnored(latest),
                 },
                 t('row.ignore'),
@@ -585,18 +652,33 @@ window.__ModuleLoader__.load({
                 },
                 t('row.reload'),
               )
-            : updateAvailable
+            : preparedReady
               ? h(
                   'button',
                   {
                     type: 'button',
                     className: 'dsu-btn dsu-btn-primary',
-                    disabled: applying || updatingElsewhere,
-                    onClick: () => store.applyUpdate(),
+                    disabled: applying,
+                    onClick: () => store.applyPrepared(),
                   },
-                  applying || updatingElsewhere ? t('row.updateBusy') : t('row.update'),
+                  applying ? t('row.updateBusy') : t('row.applyNow'),
                 )
-              : null,
+              : updateAvailable
+                ? h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsu-btn dsu-btn-primary',
+                      disabled: applying || busy,
+                      onClick: () => store.applyUpdate(),
+                    },
+                    busy || applying
+                      ? staging
+                        ? t('row.stageApplying')
+                        : t('row.updateBusy')
+                      : t('row.update'),
+                  )
+                : null,
         ),
       ];
 
@@ -616,22 +698,27 @@ window.__ModuleLoader__.load({
       const ignored = Boolean(status.ignored);
       const applying = state.applying;
       const applied = state.applied;
-      const updatingElsewhere = Boolean(status.updating) && !applying && !applied;
+      const updatePhase = status.updatePhase ?? null;
+      const busy = Boolean(status.updating) && !applying && !applied;
+      const staging = busy && updatePhase === 'stage';
+      const updatingElsewhere = busy && updatePhase !== 'stage';
+      const prepared = status.prepared ?? null;
+      const preparedReady = prepared !== null && current !== null && prepared.version !== current;
       const visible =
         !state.dismissed &&
-        ((updateAvailable && !ignored) || applying || applied || updatingElsewhere);
+        ((updateAvailable && !ignored) || applying || applied || updatingElsewhere || staging || preparedReady);
       if (!visible) return null;
 
       const releases = Array.isArray(status.pending) ? status.pending : [];
       const notesOpen = state.notesOpen;
       const extra =
-        !applying && !applied && !updatingElsewhere && releases.length > 1
+        !applying && !applied && !updatingElsewhere && !staging && !preparedReady && releases.length > 1
           ? t('prompt.multi', { count: releases.length })
           : '';
 
       const actions = [];
-      if (applying || updatingElsewhere) {
-        /* Nothing to click while the update helper runs. */
+      if (applying || updatingElsewhere || staging) {
+        /* Nothing to click while a download or the switch is running. */
       } else if (applied) {
         actions.push(
           h(
@@ -643,6 +730,30 @@ window.__ModuleLoader__.load({
               key: 'reload',
             },
             t('prompt.reload'),
+          ),
+        );
+      } else if (preparedReady) {
+        actions.push(
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsu-btn dsu-btn-secondary',
+              onClick: () => store.dismiss(),
+              key: 'later',
+            },
+            t('prompt.later'),
+          ),
+          h('span', { className: 'dsu-spacer', key: 'spacer' }),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsu-btn dsu-btn-primary',
+              onClick: () => store.applyPrepared(),
+              key: 'apply-now',
+            },
+            t('prompt.applyNow'),
           ),
         );
       } else {
@@ -696,17 +807,23 @@ window.__ModuleLoader__.load({
               { className: 'dsu-prompt-title' },
               applying || updatingElsewhere
                 ? t('prompt.titleApplying')
-                : applied
-                  ? t('prompt.titleApplied')
-                  : t('prompt.title', { version: latest }),
+                : staging
+                  ? t('prompt.stagingTitle')
+                  : applied
+                    ? t('prompt.titleApplied')
+                    : preparedReady
+                      ? t('prompt.preparedTitle', { version: prepared.version })
+                      : t('prompt.title', { version: latest }),
             ),
-            !applying && !applied && !updatingElsewhere
-              ? h(
-                  'div',
-                  { className: 'dsu-prompt-sub' },
-                  t('prompt.line', { current: current !== null ? current : t('common.unknown'), extra }),
-                )
-              : null,
+            preparedReady
+              ? h('div', { className: 'dsu-prompt-sub' }, t('prompt.preparedSub'))
+              : !applying && !applied && !updatingElsewhere && !staging
+                ? h(
+                    'div',
+                    { className: 'dsu-prompt-sub' },
+                    t('prompt.line', { current: current !== null ? current : t('common.unknown'), extra }),
+                  )
+                : null,
           ),
           h(
             'button',
@@ -721,7 +838,11 @@ window.__ModuleLoader__.load({
         ),
       );
 
-      if (applying) {
+      if (staging) {
+        body.push(
+          h('div', { className: 'dsu-muted', key: 'staging' }, t('prompt.staging')),
+        );
+      } else if (applying) {
         body.push(
           h('div', { className: 'dsu-muted', key: 'applying' }, t('prompt.applying')),
           state.applyLog
